@@ -1,0 +1,8 @@
+name: corpus_synthesizer
+channels:
+  - conda-forge
+dependencies:
+  # Specify python version here!
+  - python=3.9
+  # List system dependencies here!
+  - curl=7.80.0

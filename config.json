@@ -1,0 +1,12 @@
+{
+  "violence": "off",
+  "sexual_content": "low",
+  "verbal_abuse": "medium",
+  "identity_hate": "medium",
+  "profanity": "high",
+  "link_sharing": "high",
+  "drugs": "off",
+  "spam": "on",
+  "self_harm": "on",
+  "replace": "off"
+}
