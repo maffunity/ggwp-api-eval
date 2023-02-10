@@ -400,9 +400,9 @@ if __name__=='__main__':
         # eval
         fp_correction=0.9
         tp = 0 ; fp = 0 ; fn = 0 ; tn = 0 ; n_egs = 0
-        cache = Cache(exp_name+'.cache')
+        cache = Cache(os.path.join('stats',exp_name+'.cache'))
         stats_filename = exp_name+'{}{}.stats'.format(human_label_str, toxicity_type_str)
-        fp_stats = open(stats_filename,'wt')
+        fp_stats = open(os.path.join('stats',stats_filename),'wt')
         print ('check stats file {}'.format(stats_filename))
         for key, metadata in voice_actor_dataset.items():
             text = metadata['text']
