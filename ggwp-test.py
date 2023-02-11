@@ -46,10 +46,10 @@ voice_actor_dataset_path='/home/ext_marc_ferras_unity3d_com/project/corpora/unit
 # }
 config = {
     "violence": "off",
-    "sexual_content": "low",
-    "verbal_abuse": "low",
+    "sexual_content": "medium",
+    "verbal_abuse": "medium",
     "identity_hate": "medium",
-    "profanity": "low",
+    "profanity": "medium",
     "link_sharing": "high",
     "drugs": "off",
     "spam": "on",
@@ -192,24 +192,59 @@ def ggwp_normalize_toxicity(result, human_label=False):
     toxicity = [ t.replace(' ','_') for t in toxicity ]
     return len(toxicity)>0, sorted(toxicity)
 
-def ggwp_toxicity_to_human_label(ggwp_toxicity_type):
+
+def detoxify_normalize_toxicity(result, threshold=0.5):
     """
     Return whether toxic and a list of types of toxicity
     """
     toxicity = []
-    if 'violence' in ggwp_toxicity_type:
+    if 'obscene' in result and result['obscene']>threshold:
+        toxicity.append ('obscene')
+    if 'identity_attack' in result and result['identity_attack']>threshold:
+        toxicity.append ('identity_attack')
+    if 'insult' in result and result['insult']>threshold:
+        toxicity.append ('insult')
+    if 'threat' in result and result['threat']>threshold:
+        toxicity.append ('threat')
+    toxicity = [ t.replace(' ','_') for t in toxicity ]
+    return len(toxicity)>0, sorted(toxicity)
+
+
+def ggwp_toxicity_to_human_label(predict_toxicity_type):
+    """
+    Return whether toxic and a list of types of toxicity
+    """
+    toxicity = []
+    if 'violence' in predict_toxicity_type:
         toxicity.append('Severe Toxicity')
-    if 'verbal_abuse' in ggwp_toxicity_type:
+    if 'verbal_abuse' in predict_toxicity_type:
         toxicity.append('Insult')
-    if 'profanity' in ggwp_toxicity_type:
+    if 'profanity' in predict_toxicity_type:
         toxicity.append('Insult')
-    if 'sexual_content' in ggwp_toxicity_type:
+    if 'sexual_content' in predict_toxicity_type:
         toxicity.append('Obscene')
-    if 'identity_hate' in ggwp_toxicity_type:
+    if 'identity_hate' in predict_toxicity_type:
         toxicity.append('Identity comments')
-    if 'drugs' in ggwp_toxicity_type:
+    if 'drugs' in predict_toxicity_type:
         toxicity.append('drugs')
-    if 'self_harm' in ggwp_toxicity_type:
+    if 'self_harm' in predict_toxicity_type:
+        toxicity.append('Threat')
+    toxicity = [ t.replace(' ','_') for t in toxicity ]
+    return len(toxicity)>0, sorted(toxicity)
+
+
+def detoxify_toxicity_to_human_label(predict_toxicity_type):
+    """
+    Return whether toxic and a list of types of toxicity
+    """
+    toxicity = []
+    if 'obscene' in predict_toxicity_type:
+        toxicity.append('Obscene')
+    if 'insult' in predict_toxicity_type:
+        toxicity.append('Insult')
+    if 'identity_attack' in predict_toxicity_type:
+        toxicity.append('Identity comments')
+    if 'threat' in predict_toxicity_type:
         toxicity.append('Threat')
     toxicity = [ t.replace(' ','_') for t in toxicity ]
     return len(toxicity)>0, sorted(toxicity)
@@ -372,12 +407,21 @@ if __name__=='__main__':
             sentence_cleaner,
         )
 
-    max_egs = 200
+    max_egs = 5000
     # use human labels or GGWP labels for evaluation
-    human_label = False
+    human_label = True
     # break-down evaluation per toxicity type
-    per_toxicity_type = False
-    exp_name = 'ggwp_eval_{}_{}'.format(
+    per_toxicity_type = True
+    # system='ggwp'
+    system='detoxify'
+    if system=='detoxify':
+        from detoxify import Detoxify
+        detoxify_model = Detoxify('original')
+    else:
+        detoxify_model = None
+
+    exp_name = '{}_eval_{}_{}'.format(
+                system,
                 norm_config_short_name,
                 get_short_config_name(config) )
 
@@ -391,18 +435,20 @@ if __name__=='__main__':
 
     for toxicity_type in toxicity_types:
         if len(toxicity_type)!='all':
-            print ('evaluating toxicity type {}'.format(toxicity_type))
+            print ('\nevaluating toxicity type {} on system {}'.format(toxicity_type, system.upper()))
         else:
-            print ('evaluating any toxicity')
+            print ('\nevaluating any toxicity on system {}'.format(system.upper()))
 
         toxicity_type_str = '_'+toxicity_type if toxicity_type!='all' else ''
         human_label_str = '_hl1' if human_label else ''
         # eval
         fp_correction=0.9
         tp = 0 ; fp = 0 ; fn = 0 ; tn = 0 ; n_egs = 0
+        # print ('opening cache file {}'.format(os.path.join('stats',exp_name+'.cache')))
+        # sys.exit()
         cache = Cache(os.path.join('stats',exp_name+'.cache'))
-        stats_filename = exp_name+'{}{}.stats'.format(human_label_str, toxicity_type_str)
-        fp_stats = open(os.path.join('stats',stats_filename),'wt')
+        stats_filename = os.path.join('stats',exp_name+'{}{}.stats'.format(human_label_str, toxicity_type_str))
+        fp_stats = open(stats_filename,'wt')
         print ('check stats file {}'.format(stats_filename))
         for key, metadata in voice_actor_dataset.items():
             text = metadata['text']
@@ -411,48 +457,56 @@ if __name__=='__main__':
                 gt_toxic = toxicity_type in gt_toxicity_type
 
             if cache.get(text) is None:
-                result = ggwp_request (text, config)
-                if result is None:
-                    print ('GGWP query failed!')
-                    sys.exit()
-                # cache using raw GGWP labels, convert to human labels later
-                ggwp_toxic, ggwp_toxicity_type = ggwp_normalize_toxicity(result, human_label=False)
-                cache.add(text, ggwp_toxic, ggwp_toxicity_type)
-                time.sleep(0.5* random.random())
+                if system =='ggwp':
+                    result = ggwp_request (text, config)
+                    if result is None:
+                        print ('GGWP query failed!')
+                        sys.exit()
+                    # cache using raw GGWP labels, convert to human labels later
+                    predict_toxic, predict_toxicity_type = ggwp_normalize_toxicity(result, human_label=False)
+                    cache.add(text, predict_toxic, predict_toxicity_type)
+                    time.sleep(0.5* random.random())
+                else:
+                    result = detoxify_model.predict(text)
+                    predict_toxic, predict_toxicity_type = detoxify_normalize_toxicity(result)
+                    cache.add(text, predict_toxic, predict_toxicity_type)
             else:
-                ggwp_toxic, ggwp_toxicity_type = cache.get(text)
+                predict_toxic, predict_toxicity_type = cache.get(text)
             
             # use human labels or GGWP label
             if human_label:
-                ggwp_toxic, ggwp_toxicity_type = ggwp_toxicity_to_human_label (ggwp_toxicity_type)
+                if system=='ggwp':
+                    predict_toxic, predict_toxicity_type = ggwp_toxicity_to_human_label (predict_toxicity_type)
+                elif system =='detoxify':
+                    predict_toxic, predict_toxicity_type = detoxify_toxicity_to_human_label (predict_toxicity_type)
             # map tocixity_type to binary if evaluating a certain type of toxicity
             if toxicity_type!='all':
-                ggwp_toxic = toxicity_type in ggwp_toxicity_type
+                predict_toxic = toxicity_type in predict_toxicity_type
 
-            # print ('checking',text, gt_toxicity_type, ggwp_toxicity_type)
-            tp += gt_toxic and ggwp_toxic
-            fp += not gt_toxic and ggwp_toxic
-            fn += gt_toxic and not ggwp_toxic
-            tn += not gt_toxic and not ggwp_toxic
+            # print ('checking',text, gt_toxicity_type, predict_toxicity_type)
+            tp += gt_toxic and predict_toxic
+            fp += not gt_toxic and predict_toxic
+            fn += gt_toxic and not predict_toxic
+            tn += not gt_toxic and not predict_toxic
             n_egs += 1
-            if gt_toxic != ggwp_toxic:
-                if gt_toxic and not ggwp_toxic:
-                    fp_stats.write('\'{}\': FALSE-NEGATIVE, Human:{}({}), GGWP:{}({})\n'.format(text, ','.join(gt_toxicity_type), gt_toxic, ','.join(gt_toxicity_type), ggwp_toxic))
+            if gt_toxic != predict_toxic:
+                if gt_toxic and not predict_toxic:
+                    fp_stats.write('\'{}\': FALSE-NEGATIVE, Human:{}({}), {}:{}({})\n'.format(text, ','.join(gt_toxicity_type), gt_toxic, system.upper(), ','.join(gt_toxicity_type), predict_toxic))
                     if not per_toxicity_type:
-                        print('\'{}\': FALSE_NEGATIVE, Human:{}({}), GGWP:{}({})'.format(text, ','.join(gt_toxicity_type), gt_toxic, ','.join(gt_toxicity_type), ggwp_toxic))
+                        print('\'{}\': FALSE_NEGATIVE, Human:{}({}), {}:{}({})'.format(text, ','.join(gt_toxicity_type), gt_toxic, system.upper(), ','.join(gt_toxicity_type), predict_toxic))
                 else:
-                    fp_stats.write('\'{}\': FALSE-POSITIVE ERROR, Human:{}({}), GGWP:{}({})\n'.format(text, ','.join(gt_toxicity_type), gt_toxic, ','.join(ggwp_toxicity_type), ggwp_toxic))
+                    fp_stats.write('\'{}\': FALSE-POSITIVE ERROR, Human:{}({}), {}:{}({})\n'.format(text, ','.join(gt_toxicity_type), gt_toxic, system.upper(), ','.join(predict_toxicity_type), predict_toxic))
                     if not per_toxicity_type:
-                        print('\'{}\': FALSE-POSITIVE ERROR, Human:{}({}), GGWP:{}({})'.format(text, ','.join(gt_toxicity_type), gt_toxic, ','.join(ggwp_toxicity_type), ggwp_toxic))
+                        print('\'{}\': FALSE-POSITIVE ERROR, Human:{}({}), {}:{}({})'.format(text, ','.join(gt_toxicity_type), gt_toxic, system.upper(), ','.join(predict_toxicity_type), predict_toxic))
             else:
-                if gt_toxic and ggwp_toxic:
-                    fp_stats.write('\'{}\': TRUE-POSITIVE, Human:{}({}), GGWP:{}({})\n'.format(text, ','.join(gt_toxicity_type), gt_toxic, ','.join(ggwp_toxicity_type), ggwp_toxic))
+                if gt_toxic and predict_toxic:
+                    fp_stats.write('\'{}\': TRUE-POSITIVE, Human:{}({}), {}:{}({})\n'.format(text, ','.join(gt_toxicity_type), gt_toxic, system.upper(), ','.join(predict_toxicity_type), predict_toxic))
                     if not per_toxicity_type:
-                        print('\'{}\': TRUE-POSITIVE, Human:{}({}), GGWP:{}({})'.format(text, ','.join(gt_toxicity_type), gt_toxic, ','.join(ggwp_toxicity_type), ggwp_toxic))
+                        print('\'{}\': TRUE-POSITIVE, Human:{}({}), {}:{}({})'.format(text, ','.join(gt_toxicity_type), gt_toxic, system.upper(), ','.join(predict_toxicity_type), predict_toxic))
                 else:
-                    fp_stats.write('\'{}\': TRUE-NEGATIVE, Human:{}({}), GGWP:{}({})\n'.format(text, ','.join(gt_toxicity_type), gt_toxic, ','.join(ggwp_toxicity_type), ggwp_toxic))
+                    fp_stats.write('\'{}\': TRUE-NEGATIVE, Human:{}({}), {}:{}({})\n'.format(text, ','.join(gt_toxicity_type), gt_toxic, system.upper(), ','.join(predict_toxicity_type), predict_toxic))
                     if not per_toxicity_type:
-                        print('\'{}\': TRUE-NEGATIVE, Human:{}({}), GGWP:{}({})'.format(text, ','.join(gt_toxicity_type), gt_toxic, ','.join(ggwp_toxicity_type), ggwp_toxic))
+                        print('\'{}\': TRUE-NEGATIVE, Human:{}({}), {}:{}({})'.format(text, ','.join(gt_toxicity_type), gt_toxic, system.upper(), ','.join(predict_toxicity_type), predict_toxic))
 
             if max_egs is not None and n_egs>=max_egs:
                 break
