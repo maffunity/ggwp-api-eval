@@ -155,6 +155,9 @@ def ggwp_normalize_toxicity(result, human_label=False):
     """
     Return whether toxic and a list of types of toxicity
     """
+    if result is None:
+        return None, None
+
     toxicity = []
     if result['violence']:
         if human_label:
@@ -189,8 +192,13 @@ def ggwp_normalize_toxicity(result, human_label=False):
             toxicity.append('Threat')
         else:
             toxicity.append('self_harm')
+    if result['filtered_message']:
+        filtered_message = result['filtered_message']
+    else:
+        filtered_message = None
+
     toxicity = [ t.replace(' ','_') for t in toxicity ]
-    return len(toxicity)>0, sorted(toxicity)
+    return len(toxicity)>0, sorted(toxicity), filtered_message
 
 
 def detoxify_normalize_toxicity(result, threshold=0.5):
@@ -355,11 +363,17 @@ class Cache:
         else:
             self.fp = open (self.fn, 'wt')
 
-    def add(self, text, toxic, toxicity_types):
-        self.cache[text] = (toxic, toxicity_types)
+    def add(self, text, toxic, toxicity_types, filtered_message=None):
+        if filtered_message is None: 
+            self.cache[text] = (toxic, toxicity_types)
+        else:
+            self.cache[text] = (toxic, toxicity_types, filtered_message)
         self.n_entries = len(self.cache)
         if self.fp is not None:
-            self.fp.write('{}|{}|{}\n'.format(text, toxic, ','.join(toxicity_types)))
+            if filtered_message is None: 
+                self.fp.write('{}|{}|{}\n'.format(text, toxic, ','.join(toxicity_types)))
+            else:
+                self.fp.write('{}|{}|{}|{}\n'.format(text, toxic, ','.join(toxicity_types), filtered_message))
             self.fp.flush()
 
     def get(self, text):
@@ -376,11 +390,15 @@ class Cache:
             for line in fp:
                 line = line.strip()
                 parts = line.split('|')
-                if len(parts)==3:
+                if len(parts)>=3:
                     text = parts[0]
                     toxic = True if parts[1].lower() in ("yes", "true", "t", "1") else False
                     toxicity_type = parts[2].split(',')
-                    self.cache[text] = (toxic, toxicity_type)
+                    if len(parts)==4:
+                        filtered_message = parts[3]
+                    else:
+                        filtered_message = None
+                    self.cache[text] = (toxic, toxicity_type, filtered_message)
 
 
 if __name__=='__main__':
@@ -412,8 +430,8 @@ if __name__=='__main__':
     human_label = True
     # break-down evaluation per toxicity type
     per_toxicity_type = True
-    # system='ggwp'
-    system='detoxify'
+    system='ggwp'
+    # system='detoxify'
     if system=='detoxify':
         from detoxify import Detoxify
         detoxify_model = Detoxify('original')
@@ -463,15 +481,15 @@ if __name__=='__main__':
                         print ('GGWP query failed!')
                         sys.exit()
                     # cache using raw GGWP labels, convert to human labels later
-                    predict_toxic, predict_toxicity_type = ggwp_normalize_toxicity(result, human_label=False)
-                    cache.add(text, predict_toxic, predict_toxicity_type)
+                    predict_toxic, predict_toxicity_type, filtered_message = ggwp_normalize_toxicity(result, human_label=False)
+                    cache.add(text, predict_toxic, predict_toxicity_type, filtered_message)
                     time.sleep(0.5* random.random())
                 else:
                     result = detoxify_model.predict(text)
                     predict_toxic, predict_toxicity_type = detoxify_normalize_toxicity(result)
                     cache.add(text, predict_toxic, predict_toxicity_type)
             else:
-                predict_toxic, predict_toxicity_type = cache.get(text)
+                predict_toxic, predict_toxicity_type, filtered_message = cache.get(text)
             
             # use human labels or GGWP label
             if human_label:
