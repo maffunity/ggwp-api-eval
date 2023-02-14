@@ -11,6 +11,7 @@ import csv
 import sys
 import sentence_cleaner
 import math
+import string
 
 api_key = '3_Hb2c23mrmtsJSIvbODo2aditTDh7Wt5Linsdmgq-rY1aKvrbS5sdaru9iorralt9OotavWoeSq2qaqgHqAgnt1vG0'
 base_url = 'https://api.ggwp.com/chat/v2/message'
@@ -46,10 +47,10 @@ voice_actor_dataset_path='/home/ext_marc_ferras_unity3d_com/project/corpora/unit
 # }
 config = {
     "violence": "off",
-    "sexual_content": "medium",
+    "sexual_content": "high",
     "verbal_abuse": "medium",
     "identity_hate": "medium",
-    "profanity": "medium",
+    "profanity": "high",
     "link_sharing": "high",
     "drugs": "off",
     "spam": "on",
@@ -120,17 +121,18 @@ def get_short_norm_config_name( punctuation, uppercase, verbalize_numbers, verba
     )
     return config_short_name 
 
-def ggwp_request (text, config):
+def ggwp_request (text, config, n=None):
     config_base64 = base64.b64encode(bytes(json.dumps(config, indent = 2), 'ascii')).decode()
     header = {
         'x-api-config': config_base64,
         'x-api-key': api_key,
         'Content-Type': 'application/json',
         }
+    session_id = ''.join(random.choice(string.ascii_lowercase) for i in range(16))
     data = {
-        "session_id": "test_session",
+        "session_id": "{}{}".format(session_id, n if n is not None else ''),
         "message": text,
-        "user_id": "test_user",
+        "user_id": "test_user{}",
         "username": "test_username",
         "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     }
@@ -139,6 +141,8 @@ def ggwp_request (text, config):
         result = json.loads(response.text)
         input_text = result['message_details']['original_message']
         filtered_text = result['message_details']['filtered_message']
+        # print ('input text', input_text)
+        # print ('filtered text', filtered_text)
         return (result['message_details'])
     else:
         return None
@@ -171,7 +175,9 @@ def ggwp_normalize_toxicity(result, human_label=False):
             toxicity.append('verbal_abuse')
     if result['profanity']:
         if human_label:
-            toxicity.append('Insult')
+            # toxicity.append('Obscene')
+            # toxicity.append('Insult')
+            x=4
         else:
             toxicity.append('profanity')
     if result['sexual_content']:
@@ -205,14 +211,25 @@ def detoxify_normalize_toxicity(result, threshold=0.5):
     """
     Return whether toxic and a list of types of toxicity
     """
+    if isinstance(detoxify_threshold, dict):
+        threshold_obscene = detoxify_threshold['obscene'] if 'obscene' in detoxify_threshold else threshold
+        threshold_identity_attack = detoxify_threshold['identity_attack'] if 'identity_attack' in detoxify_threshold else threshold
+        threshold_insult = detoxify_threshold['insult'] if 'insult' in detoxify_threshold else threshold
+        threshold_threat = detoxify_threshold['threat'] if 'threat' in detoxify_threshold else threshold
+    else:
+        threshold_obscene = threshold
+        threshold_identity_attack = threshold
+        threshold_insult = threshold
+        threshold_threat = threshold
+
     toxicity = []
-    if 'obscene' in result and result['obscene']>threshold:
+    if 'obscene' in result and result['obscene']>threshold_obscene:
         toxicity.append ('obscene')
-    if 'identity_attack' in result and result['identity_attack']>threshold:
+    if 'identity_attack' in result and result['identity_attack']>threshold_identity_attack:
         toxicity.append ('identity_attack')
-    if 'insult' in result and result['insult']>threshold:
+    if 'insult' in result and result['insult']>threshold_insult:
         toxicity.append ('insult')
-    if 'threat' in result and result['threat']>threshold:
+    if 'threat' in result and result['threat']>threshold_threat:
         toxicity.append ('threat')
     toxicity = [ t.replace(' ','_') for t in toxicity ]
     return len(toxicity)>0, sorted(toxicity)
@@ -228,13 +245,16 @@ def ggwp_toxicity_to_human_label(predict_toxicity_type):
     if 'verbal_abuse' in predict_toxicity_type:
         toxicity.append('Insult')
     if 'profanity' in predict_toxicity_type:
-        toxicity.append('Insult')
+        # toxicity.append('Obscene')
+        # toxicity.append('Insult')
+        x=4
     if 'sexual_content' in predict_toxicity_type:
         toxicity.append('Obscene')
     if 'identity_hate' in predict_toxicity_type:
         toxicity.append('Identity comments')
     if 'drugs' in predict_toxicity_type:
-        toxicity.append('drugs')
+        # toxicity.append('drugs')
+        x=4
     if 'self_harm' in predict_toxicity_type:
         toxicity.append('Threat')
     toxicity = [ t.replace(' ','_') for t in toxicity ]
@@ -378,7 +398,11 @@ class Cache:
 
     def get(self, text):
         if text in self.cache:
-            return self.cache[text]
+            ret = self.cache[text]
+            if len(ret)==3:
+                return self.cache[text]
+            else:
+                return ret[0], ret[1], None
         else:
             return None
     
@@ -398,7 +422,11 @@ class Cache:
                         filtered_message = parts[3]
                     else:
                         filtered_message = None
-                    self.cache[text] = (toxic, toxicity_type, filtered_message)
+                    if filtered_message is None: 
+                        self.cache[text] = (toxic, toxicity_type)
+                    else:
+                        self.cache[text] = (toxic, toxicity_type, filtered_message)
+            self.n_entries = len(self.cache)
 
 
 if __name__=='__main__':
@@ -430,18 +458,30 @@ if __name__=='__main__':
     human_label = True
     # break-down evaluation per toxicity type
     per_toxicity_type = True
-    system='ggwp'
-    # system='detoxify'
+    # system='ggwp'
+    system='detoxify'
+    # detoxify_threshold=0.8
+    detoxify_threshold = {'obscene': 0.9898, 'identity_attack': 0.057, 'insult': 0.9525 , 'threat': 0.78 }
     if system=='detoxify':
         from detoxify import Detoxify
         detoxify_model = Detoxify('original')
+        if isinstance(detoxify_threshold, dict):
+            config_short_name = 'thobs{:.4f}idatt{:.4f}ins{:.4f}thr{:.4f}'.format(
+                    detoxify_threshold['obscene'],
+                    detoxify_threshold['identity_attack'],
+                    detoxify_threshold['insult'],
+                    detoxify_threshold['threat'],
+                    )
+        else:
+            config_short_name = 'th{:.1f}'.format(detoxify_threshold)
     else:
         detoxify_model = None
+        config_short_name = get_short_config_name(config)
 
     exp_name = '{}_eval_{}_{}'.format(
                 system,
                 norm_config_short_name,
-                get_short_config_name(config) )
+                config_short_name )
 
     if per_toxicity_type:
         if human_label:
@@ -464,29 +504,35 @@ if __name__=='__main__':
         tp = 0 ; fp = 0 ; fn = 0 ; tn = 0 ; n_egs = 0
         # print ('opening cache file {}'.format(os.path.join('stats',exp_name+'.cache')))
         # sys.exit()
+        print ('cache file: {}'.format(os.path.join('stats',exp_name+'.cache')))
         cache = Cache(os.path.join('stats',exp_name+'.cache'))
         stats_filename = os.path.join('stats',exp_name+'{}{}.stats'.format(human_label_str, toxicity_type_str))
         fp_stats = open(stats_filename,'wt')
         print ('check stats file {}'.format(stats_filename))
-        for key, metadata in voice_actor_dataset.items():
+        for n, (key, metadata) in enumerate(voice_actor_dataset.items()):
+            # if n!=4:
+            #     continue
             text = metadata['text']
+            # text = 'haha i was hoping someone would make a joke about us all being 14 year old white boys from california'
             gt_toxic, gt_toxicity_type = voice_actor_normalize_toxicity(metadata['toxicity'], human_label=human_label)
             if toxicity_type!='all':
                 gt_toxic = toxicity_type in gt_toxicity_type
-
-            if cache.get(text) is None:
+            if text not in cache:
                 if system =='ggwp':
-                    result = ggwp_request (text, config)
+                    # print ('\nGGWP request',text,config)
+                    result = ggwp_request (text, config, n)
                     if result is None:
                         print ('GGWP query failed!')
                         sys.exit()
                     # cache using raw GGWP labels, convert to human labels later
+                    # print ('GGWP result', result)
                     predict_toxic, predict_toxicity_type, filtered_message = ggwp_normalize_toxicity(result, human_label=False)
+                    # print ('  adding', text, predict_toxic, predict_toxicity_type, filtered_message)
                     cache.add(text, predict_toxic, predict_toxicity_type, filtered_message)
-                    time.sleep(0.5* random.random())
+                    time.sleep(0.3* random.random())
                 else:
                     result = detoxify_model.predict(text)
-                    predict_toxic, predict_toxicity_type = detoxify_normalize_toxicity(result)
+                    predict_toxic, predict_toxicity_type = detoxify_normalize_toxicity(result, threshold=detoxify_threshold)
                     cache.add(text, predict_toxic, predict_toxicity_type)
             else:
                 predict_toxic, predict_toxicity_type, filtered_message = cache.get(text)
@@ -509,9 +555,9 @@ if __name__=='__main__':
             n_egs += 1
             if gt_toxic != predict_toxic:
                 if gt_toxic and not predict_toxic:
-                    fp_stats.write('\'{}\': FALSE-NEGATIVE, Human:{}({}), {}:{}({})\n'.format(text, ','.join(gt_toxicity_type), gt_toxic, system.upper(), ','.join(gt_toxicity_type), predict_toxic))
+                    fp_stats.write('\'{}\': FALSE-NEGATIVE, Human:{}({}), {}:{}({})\n'.format(text, ','.join(gt_toxicity_type), gt_toxic, system.upper(), ','.join(predict_toxicity_type), predict_toxic))
                     if not per_toxicity_type:
-                        print('\'{}\': FALSE_NEGATIVE, Human:{}({}), {}:{}({})'.format(text, ','.join(gt_toxicity_type), gt_toxic, system.upper(), ','.join(gt_toxicity_type), predict_toxic))
+                        print('\'{}\': FALSE_NEGATIVE, Human:{}({}), {}:{}({})'.format(text, ','.join(gt_toxicity_type), gt_toxic, system.upper(), ','.join(predict_toxicity_type), predict_toxic))
                 else:
                     fp_stats.write('\'{}\': FALSE-POSITIVE ERROR, Human:{}({}), {}:{}({})\n'.format(text, ','.join(gt_toxicity_type), gt_toxic, system.upper(), ','.join(predict_toxicity_type), predict_toxic))
                     if not per_toxicity_type:
@@ -544,8 +590,12 @@ if __name__=='__main__':
             rec = tp/(tp+fn)
         else:
             rec = math.inf
-        F1 = 2 * (prec*rec) / (prec+rec)
-        F1_corrected = 2 * (prec_corrected*rec) / (prec_corrected+rec)
+        if (prec+rec)>0:
+            F1 = 2 * (prec*rec) / (prec+rec)
+            F1_corrected = 2 * (prec_corrected*rec) / (prec_corrected+rec)
+        else:
+            F1 = math.inf
+            F1_corrected = math.inf
         print ('FP-rate: {:.1f}%, FN-rate: {:.1f}%, Precision: {:.1f}%, Recall: {:.1f}% F1-score={:.3f}'.format( fp_rate*100.0, fn_rate*100.0, prec*100.0, rec*100.0, F1))
         print ('FP-rate: {:.1f}%, FN-rate: {:.1f}%, Precision: {:.1f}%, Recall: {:.1f}% F1-score={:.3f} FA-Correction={:.1f}'.format( fp_rate_corrected*100.0, fn_rate*100.0, prec_corrected*100.0, rec*100.0, F1_corrected, fp_correction))
 
