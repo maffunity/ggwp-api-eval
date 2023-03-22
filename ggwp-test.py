@@ -491,6 +491,8 @@ if __name__=='__main__':
     else:
         toxicity_types = ['all']
 
+    fps = {}
+    fns = {}
     for toxicity_type in toxicity_types:
         if len(toxicity_type)!='all':
             print ('\nevaluating toxicity type {} on system {}'.format(toxicity_type, system.upper()))
@@ -510,24 +512,18 @@ if __name__=='__main__':
         fp_stats = open(stats_filename,'wt')
         print ('check stats file {}'.format(stats_filename))
         for n, (key, metadata) in enumerate(voice_actor_dataset.items()):
-            # if n!=4:
-            #     continue
             text = metadata['text']
-            # text = 'haha i was hoping someone would make a joke about us all being 14 year old white boys from california'
             gt_toxic, gt_toxicity_type = voice_actor_normalize_toxicity(metadata['toxicity'], human_label=human_label)
             if toxicity_type!='all':
                 gt_toxic = toxicity_type in gt_toxicity_type
             if text not in cache:
                 if system =='ggwp':
-                    # print ('\nGGWP request',text,config)
                     result = ggwp_request (text, config, n)
                     if result is None:
                         print ('GGWP query failed!')
                         sys.exit()
                     # cache using raw GGWP labels, convert to human labels later
-                    # print ('GGWP result', result)
                     predict_toxic, predict_toxicity_type, filtered_message = ggwp_normalize_toxicity(result, human_label=False)
-                    # print ('  adding', text, predict_toxic, predict_toxicity_type, filtered_message)
                     cache.add(text, predict_toxic, predict_toxicity_type, filtered_message)
                     time.sleep(0.3* random.random())
                 else:
