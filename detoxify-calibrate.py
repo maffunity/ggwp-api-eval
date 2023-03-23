@@ -415,7 +415,7 @@ if __name__=='__main__':
     # detoxify_threshold=0.8
     # detoxify_threshold = {'obscene': 0.9898, 'identity_attack': 0.057, 'insult': 0.9525 , 'threat': 0.78 }
     detoxify_threshold = {'obscene': 0.5, 'identity_attack': 0.5, 'insult': 0.5 , 'threat': 0.5 }
-    detoxify_max_fp = {'obscene': 0.02, 'identity_attack': 0.02, 'insult': 0.02, 'threat': 0.02 }
+    detoxify_max_fp = {'obscene': 0.03, 'identity_attack': 0.01, 'insult': 0.05, 'threat': 0.04 }
     detoxify_max_fn = {'obscene': 0.12, 'identity_attack': 0.12, 'insult': 0.12, 'threat': 0.12 }
     if system=='detoxify':
         from detoxify import Detoxify
@@ -444,18 +444,22 @@ if __name__=='__main__':
     #     print ('{}: {:4f}% @ th={:.4f}'.format(toxicity_type,fps_last[toxicity_type]*100.0, ths_last[toxicity_type]))
     # ths = update_thresholds (fps_last, fns_last, ths_last, None, None, None)
     # print ()
-    target_error_best = 10000
     ths = dict(detoxify_threshold)
     ths_best = dict(ths)
-    fps_best = dict(detoxify_threshold)
-    fns_best = dict(detoxify_threshold)
-    cnt_no_improvement = 0
+    fps_best = { toxicity_type: 10000 for toxicity_type, th in ths.items() }
+    fns_best = { toxicity_type: 10000 for toxicity_type, th in ths.items() }
+    target_error_best = 10000
+    target_errors_best = { toxicity_type: 10000 for toxicity_type, th in ths.items() } 
+    target_tol = 0.1
     order_fp = 1.0
     order_fn = 1.0
     n_runs = 0
     opt_phase = 'global'
-    weight_local_linear = 1.0
-    while target_error_best>0:
+    learning_rate = { toxicity_type: 1.0 for toxicity_type, th in ths.items() }
+    cnt_no_improvement = 0
+    cnt_no_improvements = { toxicity_type: 0 for toxicity_type, th in ths.items() }
+    while any([ ( (fps_best[toxicity_type]>(1+target_tol)*detoxify_max_fp[toxicity_type]) or \
+                  (fps_best[toxicity_type]<(1-target_tol)*detoxify_max_fp[toxicity_type]) ) for toxicity_type in ths ]):
         if opt_phase == 'global':
                 ths = { toxicity_type: random.random() for toxicity_type, th in ths.items() }
         elif opt_phase == 'local-linear':
@@ -468,12 +472,12 @@ if __name__=='__main__':
            current = fps[tox]
            if current>target:
                # we want fewer FPs => raise threshold
-               grad = weight_local_linear * (current-target)
+               grad = learning_rate[tox] * (current-target)
                grad = min(0.01, grad)
                ths[tox] += grad
            else:
                # we can lower the threshold a bit to allow more FPs
-               grad = weight_local_linear * (target-current)
+               grad = learning_rate[tox] * (target-current)
                grad = min(0.01, grad)
                ths[tox] -= grad
            # print ('toxicity', tox, 'current', current, 'target', target, 'diff', current-target,'gradient', (current-target), 'grad',grad)
@@ -488,6 +492,8 @@ if __name__=='__main__':
         target_error = sum ( target_errors.values() )
         n_runs += 1
 
+        cnt_no_improvements = { toxicity_type: (0 if target_errors[toxicity_type]<target_errors_best[toxicity_type] else cnt+1) for toxicity_type, cnt in cnt_no_improvements.items() }
+        # print (cnt_no_improvement)
         if target_error<target_error_best:
             target_error_best = target_error
             target_errors_best = dict(target_errors)
@@ -497,22 +503,29 @@ if __name__=='__main__':
             cnt_no_improvement = 0
         else:
             cnt_no_improvement += 1
-            if opt_phase=='local-linear' and cnt_no_improvement>5:
-                cnt_no_improvement = 0
-                weight_local_linear *= 0.95
-                if weight_local_linear<0.1:
-                    weight_local_linear=0.1
-            if opt_phase=='global' and cnt_no_improvement>50:
-                cnt_no_improvement = 0
-                opt_phase = 'local-linear'
-                # start with best threshold so far
-                ths = dict(ths_best)
+            if opt_phase=='local-linear':
+                for toxicity_type in cnt_no_improvements:
+                    if cnt_no_improvements[toxicity_type]>10:
+                        cnt_no_improvements[toxicity_type] = 0
+                        learning_rate[toxicity_type] *= 0.97
+                        if learning_rate[toxicity_type]<0.1:
+                            learning_rate[toxicity_type]=0.1
+            if opt_phase=='global':
+                if cnt_no_improvement>50:
+                    cnt_no_improvements = { toxicity_type: 0 for toxicity_type, cnt in cnt_no_improvements.items() }
+                    opt_phase = 'local-linear'
+                    ths = dict(ths_best)
 
         if n_runs % 10 == 0:
             for toxicity_type in fps_best:
-                convergence = fps_best[toxicity_type]<detoxify_max_fp[toxicity_type]
-                print ('{}: FP={:.4f}% FN={:.4f}% @ th={:.6f} pass_quality={} target_error={:.4f}'.format(toxicity_type,fps_best[toxicity_type]*100.0, fns_best[toxicity_type]*100.0, ths_best[toxicity_type], convergence, target_errors_best[toxicity_type]))
-            print ('opt-phase={}, weight_local_linear={}, target_error_best={:.5f}'.format(opt_phase,weight_local_linear, target_error_best))
-    
+                within_tol = fps_best[toxicity_type]<=(1+target_tol)*detoxify_max_fp[toxicity_type] and fps_best[toxicity_type]>=(1-target_tol)*detoxify_max_fp[toxicity_type]
+                print ('{}: FP={:.4f}% FN={:.4f}% @ th={:.6f} ({:.5f}<{:.5f}<{:.5f}:{} target_error={:.4f}'.format(toxicity_type,fps_best[toxicity_type]*100.0, fns_best[toxicity_type]*100.0, ths_best[toxicity_type], (1-target_tol)*detoxify_max_fp[toxicity_type], fps_best[toxicity_type], (1+target_tol)*detoxify_max_fp[toxicity_type], within_tol, target_errors_best[toxicity_type]))
+            print ('opt-phase={}, learn-rate={}, target_error_best={:.5f}'.format(opt_phase,learning_rate, target_error_best))
             print ()
+
+    for toxicity_type in fps_best:
+        within_tol = fps_best[toxicity_type]<=(1+target_tol)*detoxify_max_fp[toxicity_type] and fps_best[toxicity_type]>=(1-target_tol)*detoxify_max_fp[toxicity_type]
+        print ('{}: FP={:.4f}% FN={:.4f}% @ th={:.6f} ({:.5f}<{:.5f}<{:.5f}:{}) target_error={:.4f}'.format(toxicity_type,fps_best[toxicity_type]*100.0, fns_best[toxicity_type]*100.0, ths_best[toxicity_type], (1-target_tol)*detoxify_max_fp[toxicity_type], fps_best[toxicity_type], (1+target_tol)*detoxify_max_fp[toxicity_type], within_tol, target_errors_best[toxicity_type]))
+    print ('opt-phase={}, learn-rate={}, target_error_best={:.5f}'.format(opt_phase,learning_rate, target_error_best))
+    print ()
 
