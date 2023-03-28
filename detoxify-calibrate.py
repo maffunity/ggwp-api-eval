@@ -218,7 +218,7 @@ class Cache:
             self.n_entries = len(self.cache)
 
 
-def eval_detoxify(th, exp_name, log=False, system='detoxify', max_egs=5000):
+def eval_detoxify(th, human_toxicity_types, exp_name, log=False, system='detoxify', max_egs=5000):
 
     fps = OrderedDict()
     fns = OrderedDict()
@@ -226,7 +226,7 @@ def eval_detoxify(th, exp_name, log=False, system='detoxify', max_egs=5000):
     tps = OrderedDict()
     total = OrderedDict()
     human_label = True
-    for toxicity_type in toxicity_types:
+    for toxicity_type in human_toxicity_types:
         if log:
             if len(toxicity_type)!='all':
                 print ('\nevaluating toxicity type {} on system {}'.format(toxicity_type, system.upper()))
@@ -315,7 +315,7 @@ def detoxify2human(toxicity_type):
     return detox_toxicity_type
 
 
-def calibrate(detoxify_max_fp, eval_system_fn, exp_name, target_tol=0.01, max_egs=5000):
+def calibrate(detoxify_max_fp, human_toxicity_types, eval_system_fn, exp_name, target_tol=0.01, max_egs=5000):
 
     ths = { toxicity_type: 0.5 for toxicity_type, th in detoxify_max_fp.items() }
     ths_best = dict(ths)
@@ -349,7 +349,7 @@ def calibrate(detoxify_max_fp, eval_system_fn, exp_name, target_tol=0.01, max_eg
                 ths[tox] += grad
        
         # evaluate fp, fn rates for the current threshold
-        fps, fns, tps, tns, total = eval_system_fn(th=ths, exp_name=exp_name, log=False, max_egs=5000)
+        fps, fns, tps, tns, total = eval_system_fn(th=ths, human_toxicity_types=human_toxicity_types, exp_name=exp_name, log=False, max_egs=5000)
 
         target_errors = { detox_toxicity_type: (total[detox_toxicity_type]*error_fp(detox_toxicity_type) ) for detox_toxicity_type in fps }
         target_error = sum ( target_errors.values() )
@@ -384,26 +384,27 @@ def calibrate(detoxify_max_fp, eval_system_fn, exp_name, target_tol=0.01, max_eg
             sys.stdout.flush()
             if any ( abs(target_errors_best[toxicity_type] - target_errors_best_last[toxicity_type])>0 for toxicity_type in target_errors_best ):
                 print ()
+                print ('opt-phase={}'.format(opt_phase))
                 for toxicity_type in fps_best:
                     within_tol = fps_best[toxicity_type]<=(detoxify_max_fp[toxicity_type]+target_tol) and fps_best[toxicity_type]>=(detoxify_max_fp[toxicity_type]-target_tol)
-                    print ('{}: FP={:.2f}% FN={:.2f}% @ th={:.6f} ({:.2f}<{:.2f}<{:.2f}:{} target_error={:.4f} learning-rate={:.3f}'.format(toxicity_type,fps_best[toxicity_type], fns_best[toxicity_type], ths_best[toxicity_type], detoxify_max_fp[toxicity_type]-target_tol, fps_best[toxicity_type], detoxify_max_fp[toxicity_type]+target_tol, within_tol, target_errors_best[toxicity_type], learning_rate[toxicity_type]))
-                print ('opt-phase={}, target_error_best={:.5f}'.format(opt_phase, target_error_best))
+                    print ('{:>15}: FP={:5.2f}% FN={:5.2f}% @ th={:8.6f}, within-tol:{:>3}, FP-target={:5.2f}±{:4.2}%, FP-error={:6.4f}, learning-rate={:6.3f}'.format(toxicity_type,fps_best[toxicity_type], fns_best[toxicity_type], ths_best[toxicity_type], 'yes' if within_tol else 'no', detoxify_max_fp[toxicity_type], target_tol, target_errors_best[toxicity_type], learning_rate[toxicity_type]))
                 print ()
 
             target_errors_best_last = dict(target_errors_best)
 
     print ()
+    print ('opt-phase={}'.format(opt_phase))
     for toxicity_type in fps_best:
         within_tol = fps_best[toxicity_type]<=(detoxify_max_fp[toxicity_type]+target_tol) and fps_best[toxicity_type]>=(detoxify_max_fp[toxicity_type]-target_tol)
-        print ('{}: FP={:.2f}% FN={:.2f}% @ th={:.6f} ({:.2f}<{:.2f}<{:.2f}:{} target_error={:.4f} learning-rate={:.3f}'.format(toxicity_type,fps_best[toxicity_type], fns_best[toxicity_type], ths_best[toxicity_type], detoxify_max_fp[toxicity_type]-target_tol, fps_best[toxicity_type], detoxify_max_fp[toxicity_type]+target_tol, within_tol, target_errors_best[toxicity_type], learning_rate[toxicity_type]))
-    print ('opt-phase={}, target_error_best={:.5f}'.format(opt_phase, target_error_best))
+        print ('{:>15}: FP={:5.2f}% FN={:5.2f}% @ th={:8.6f}, within-tol:{:>3}, FP-target={:5.2f}±{:4.2}%, FP-error={:6.4f}, learning-rate={:6.3f}'.format(toxicity_type,fps_best[toxicity_type], fns_best[toxicity_type], ths_best[toxicity_type], 'yes' if within_tol else 'no', detoxify_max_fp[toxicity_type], target_tol, target_errors_best[toxicity_type], learning_rate[toxicity_type]))
     elapsed = time.time() - t0
     print ('time-elapsed={:.1f}s'.format(elapsed))
     print ()
+    return ths_best
+
 
 if __name__=='__main__':
   
-    
     punctuation=False
     uppercase=False
     verbalize_numbers=False
@@ -425,17 +426,21 @@ if __name__=='__main__':
             sentence_cleaner,
         )
 
-
+    # set random seed
     random.seed(777)
+    # number of sentences to eval in dataset
     max_egs = 5000
     # use human labels or GGWP labels for evaluation
     detoxify_model = Detoxify('original')
+    # experiment name, to identify cache files
     exp_name = 'detoxify_eval_{}'.format(norm_config_short_name)
-    toxicity_types = ['all','Identity_comments', 'Obscene', 'Insult', 'Threat']
+    human_toxicity_types = ['Identity_comments', 'Obscene', 'Insult', 'Threat']
 
     # maximum false-positive rates allowed
-    # detoxify_max_fp = {'obscene': 3.0, 'identity_attack': 1.0, 'insult': 5.0, 'threat': 4.0 }
-    detoxify_max_fp = {'obscene': 1.0, 'identity_attack': 1.0, 'insult': 1.0, 'threat': 1.0 }
+    # target_false_positive_rates = {'obscene': 10.0, 'identity_attack': 5.0, 'insult': 12.0, 'threat': 10.0 }
+    target_false_positive_rates = {'obscene': 3.0, 'identity_attack': 1.0, 'insult': 5.0, 'threat': 4.0 }
+    # target_false_positive_rates = {'obscene': 1.0, 'identity_attack': 1.0, 'insult': 1.0, 'threat': 1.0 }
     # start calibration
-    calibrate(detoxify_max_fp, eval_detoxify, exp_name, target_tol=0.05, max_egs=max_egs)
+    opt_thresholds = calibrate(target_false_positive_rates, human_toxicity_types, eval_detoxify, exp_name, target_tol=0.01, max_egs=max_egs)
+    print ('optimal thresholds: {}'.format(opt_thresholds))
 
