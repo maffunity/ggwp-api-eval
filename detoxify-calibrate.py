@@ -218,7 +218,7 @@ class Cache:
 
 class Calibration:
 
-    def __init__(self, system_callback, exp_name, sys2gt_map=None, gt2sys_map=None, target_tol=0.01, max_egs=10, use_logits=False, timeout=300):
+    def __init__(self, system_callback, exp_name, sys2gt_map=None, gt2sys_map=None, target_tol=0.01, max_egs=10, use_logits=False, timeout=300, eval_on_human_space=False):
         self.system_callback = system_callback
         self.sys2gt_map = sys2gt_map
         self.gt2sys_map = gt2sys_map
@@ -228,6 +228,14 @@ class Calibration:
         self.use_logits = use_logits
         self.cache = None
         self.timeout = timeout
+        self.eval_on_human_space = eval_on_human_space
+
+        if self.eval_on_human_space:
+            if self.sys2gt_map is None or self.gt2sys_map is None:
+                raise Exception('eval_on_human_space=True requires sys2gt_map and gt2sys_map toxicity label maps to be provided')
+        else:
+            if self.gt2sys_map is None:
+                raise Exception('eval_on_human_space=False requires gt2sys_map to be provided')
 
     def toxicity_map(self, toxicity_type, map=None):
         if map is None:
@@ -238,7 +246,7 @@ class Calibration:
             else:
                 return None
 
-    def get_toxicities(self, result, threshold=0.5, use_logits=False):
+    def get_sys_toxicities(self, result, threshold=0.5, use_logits=False, eval_on_human_space=False):
         """
         Return whether toxic and a list of types of toxicity
         """
@@ -250,9 +258,15 @@ class Calibration:
         if use_logits:
             result = { k:math.log(v) for k,v in result.items() }
 
-        toxicity = [ tox for tox,score in result.items() if tox in thresholds and result[tox]>thresholds[tox] ]
-        toxicity = [ t.replace(' ','_') for t in toxicity ]
-        return len(toxicity)>0, sorted(toxicity)
+        toxicities = [ tox for tox,score in result.items() if tox in thresholds and result[tox]>thresholds[tox] ]
+
+        # convert to human toxicity category space if needed
+        if eval_on_human_space:
+            predict_toxic, predict_toxicity_types = self.get_toxicities_in_gt_space(toxicities)
+        else:
+            predict_toxicity_types = [ t.replace(' ','_') for t in toxicities ]
+            predict_toxic = len(predict_toxicity_types)>0
+        return predict_toxic, predict_toxicity_types
 
     def get_toxicities_in_gt_space(self, toxicity_types):
         """
@@ -263,43 +277,71 @@ class Calibration:
         toxicity = [ t.replace(' ','_') for t in toxicity_types ]
         return len(toxicity)>0, sorted(toxicity)
 
-    def eval_system(self, dataset, th, use_logits):
+    def get_toxicities_in_sys_space(self, toxicity_types):
+        """
+        Return whether toxic and a list of types of toxicity
+        """
+        if self.gt2sys_map is not None:
+            toxicity_types = [ self.gt2sys_map[tox] for tox in toxicity_types if tox in self.gt2sys_map ]
+        toxicity = [ t.replace(' ','_') for t in toxicity_types ]
+        return len(toxicity)>0, sorted(toxicity)
+    
+    def get_gt_toxicities(self, toxicities, eval_on_human_space=False):
+
+        toxicities = toxicities.split(',')
+        # convert to system toxicity category space if needed
+        if not eval_on_human_space:
+            _, toxicities = self.get_toxicities_in_sys_space(toxicities)
+
+        benign_names = set(['benign','Benign','benign_gameplay']) 
+        toxicities = [ tox.replace(' ','_') for tox in toxicities ]
+        toxicities = sorted([ t for t in toxicities if t not in benign_names ])
+        toxic = any( False if t in benign_names else True for t in toxicities )
+        return toxic, toxicities
+
+    def eval_system(self, dataset, th, use_logits, eval_on_human_space):
 
         fps = OrderedDict()
         fns = OrderedDict()
         tns = OrderedDict()
         tps = OrderedDict()
         total = OrderedDict()
-        human_label = True
-        human_toxicity_types = OrderedDict( (self.toxicity_map(t, self.sys2gt_map),t) for t in th )
-        for toxicity_type in human_toxicity_types:
+       
+        # use either human or system toxicity labels
+        if eval_on_human_space:
+            toxicity_types = [ self.toxicity_map(t, self.sys2gt_map) for t in th ]
+        else:
+            toxicity_types = list(th.keys())
 
-            toxicity_type_str = '_'+toxicity_type if toxicity_type!='all' else ''
-            human_label_str = '_hl1' if human_label else ''
+        for toxicity_type in toxicity_types:
+
+            # initialize correct/error/total counts
             tp = 0 ; fp = 0 ; fn = 0 ; tn = 0 ; n_egs = 0
+
             if self.cache is None:
                 print ('cache file {}'.format(os.path.join('stats',exp_name+'.cache')))
                 self.cache = Cache(os.path.join('stats',exp_name+'.cache'))
 
             for n, (key, metadata) in enumerate(dataset.get_data().items()):
                 text = metadata['text']
-                gt_toxic, gt_toxicity_type = dataset.normalize_toxicity(metadata['toxicity'])
+                # get ground-truth labels
+                gt_toxic, gt_toxicity_types = self.get_gt_toxicities(metadata['toxicity'], eval_on_human_space=eval_on_human_space)
+                # determine overall ground-truth toxicity label
                 if toxicity_type!='all':
-                    gt_toxic = toxicity_type in gt_toxicity_type
+                    gt_toxic = toxicity_type in gt_toxicity_types
+                # compute/cache/get-from-cache system scores
                 if text not in self.cache:
                     result = self.system_callback(text)
                     self.cache.add(text, result)
                 else:
                     result = self.cache.get(text)
-                predict_toxic, predict_toxicity_types = self.get_toxicities(result, threshold=th, use_logits=use_logits)
-                
-                # convert to human labels
-                if human_label:
-                    predict_toxic, predict_toxicity_types = self.get_toxicities_in_gt_space(predict_toxicity_types)
-                # map tocixity_type to binary if evaluating a certain type of toxicity
+                # threshold scores and compute toxicity labels in system sapce
+                predict_toxic, predict_toxicity_types = self.get_sys_toxicities(result, threshold=th, use_logits=use_logits, eval_on_human_space=eval_on_human_space)
+                # determine overall system toxicity label
                 if toxicity_type!='all':
                     predict_toxic = toxicity_type in predict_toxicity_types
 
+                # count all ground-truth vs. system output outcomes
                 tp += gt_toxic and predict_toxic
                 fp += not gt_toxic and predict_toxic
                 fn += gt_toxic and not predict_toxic
@@ -309,13 +351,19 @@ class Calibration:
                 if self.max_egs is not None and n_egs>=self.max_egs:
                     break
 
+            # compute error and correct rates
             fp_rate = fp/n_egs
             fn_rate = fn/n_egs
             tp_rate = tp/n_egs
             tn_rate = tn/n_egs
 
             if toxicity_type!='all':
-                detox_toxicity_type = self.toxicity_map(toxicity_type, self.gt2sys_map)
+                # convert toxicity type to system space if needed
+                if eval_on_human_space:
+                    detox_toxicity_type = self.toxicity_map(toxicity_type, self.gt2sys_map)
+                else:
+                    detox_toxicity_type = toxicity_type
+
                 tps[detox_toxicity_type] = tp_rate * 100
                 tns[detox_toxicity_type] = tn_rate * 100
                 fps[detox_toxicity_type] = fp_rate * 100
@@ -327,10 +375,18 @@ class Calibration:
         return fps, fns, tps, tns, total
 
 
-    def calibrate(self, dataset, target_fps, target_tol=None, use_logits=None):
+    def calibrate(self, dataset, target_fps, target_tol=None, use_logits=None, eval_on_human_space=None):
 
         target_tol = self.target_tol if target_tol is None else target_tol
         use_logits = self.use_logits if use_logits is None else use_logits
+        eval_on_human_space = self.eval_on_human_space if eval_on_human_space is None else eval_on_human_space
+
+        if self.eval_on_human_space:
+            if self.sys2gt_map is None or self.gt2sys_map is None:
+                raise Exception('eval_on_human_space=True requires sys2gt_map and gt2sys_map toxicity label maps to be provided')
+        else:
+            if self.gt2sys_map is None:
+                raise Exception('eval_on_human_space=False requires gt2sys_map to be provided')
 
         ths = { toxicity_type: math.log(0.5) if use_logits else 0.5 for toxicity_type, th in target_fps.items() }
         ths_best = dict(ths)
@@ -369,7 +425,7 @@ class Calibration:
                     ths[tox] += grad
            
             # evaluate fp, fn rates for the current threshold
-            fps, fns, tps, tns, total = self.eval_system(dataset=dataset, th=ths, use_logits=use_logits)
+            fps, fns, tps, tns, total = self.eval_system(dataset=dataset, th=ths, use_logits=use_logits, eval_on_human_space=eval_on_human_space)
 
             target_errors = { detox_toxicity_type: (total[detox_toxicity_type]*error_fp(detox_toxicity_type) ) for detox_toxicity_type in fps }
             target_error = sum ( target_errors.values() )
@@ -445,18 +501,17 @@ if __name__=='__main__':
    
     # load CSV dataset, from 1+ local/GCS CSV file(s)
     # voice actor audio + human (voice actor) toxicity labelling
-    # voice_actor_dataset_path='gs://unity-oto-ml-prd-us-central1-innodata/voice_acting/batch_1/outdated'
-    # voice_actor_dataset = CSVDataset(voice_actor_dataset_path, sentence_cleaner)
-    # gt2sys_map = {'Identity_comments':'identity_attack', 'Obscene':'obscene', 'Insult':'insult', 'Threat':'threat'}
-    # sys2gt_map = {'identity_attack':'Identity_comments', 'obscene':'Obscene', 'insult':'Insult', 'threat': 'Threat'}
-    # dataset = voice_actor_dataset
+    voice_actor_dataset_path='gs://unity-oto-ml-prd-us-central1-innodata/voice_acting/batch_1/outdated'
+    voice_actor_dataset = CSVDataset(voice_actor_dataset_path, sentence_cleaner)
+    gt2sys_map = {'Identity_comments':'identity_attack', 'Obscene':'obscene', 'Insult':'insult', 'Threat':'threat'}
+    dataset = voice_actor_dataset
 
-    # customer data GCP transcripts + human toxicity labelling
-    customer_dataset_path = 'gs://unity-oto-ml-prd-us-central1-innodata/labelling/batch_20230310/labelling_batch_20230310_labels.csv'
-    customer_dataset = CSVDataset(customer_dataset_path, sentence_cleaner)
-    gt2sys_map = {'identity_comment':'identity_attack', 'sexually_explicit':'obscene', 'insult':'insult', 'threat':'threat'}
-    sys2gt_map = {'identity_attack':'identity_comment', 'obscene':'sexually_explicit', 'insult':'insult', 'threat': 'threat'}
-    dataset = customer_dataset
+    # # customer data GCP transcripts + human toxicity labelling
+    # customer_dataset_path = 'gs://unity-oto-ml-prd-us-central1-innodata/labelling/batch_20230310/labelling_batch_20230310_labels.csv'
+    # customer_dataset = CSVDataset(customer_dataset_path, sentence_cleaner)
+    # gt2sys_map = {'benign_gameplay':'osbcene', 'identity_comment':'identity_attack', 'sexually_explicit':'obscene', 'insult':'insult', 'threat':'threat'}
+    # # gt2sys_map = {'identity_comment':'identity_attack', 'sexually_explicit':'obscene', 'insult':'insult', 'threat':'threat'}
+    # dataset = customer_dataset
 
     # set random seed
     random.seed(777)
@@ -470,12 +525,12 @@ if __name__=='__main__':
     calibration = Calibration(
             system_callback=detoxify_model.predict,
             exp_name=exp_name,
-            sys2gt_map=sys2gt_map,
             gt2sys_map=gt2sys_map,
             target_tol=0.1,
             max_egs=5000,
             use_logits=False,
             timeout=30,
+            eval_on_human_space=False,
         )
     opt_thresholds = calibration.calibrate(dataset, target_false_positive_rates)
     print ('optimal thresholds: {}'.format(opt_thresholds))
