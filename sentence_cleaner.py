@@ -314,6 +314,23 @@ class SentenceCleaner:
         self.expand_word_map = MultiWordMapper(word_map_expand)
         self.emoji_map = MultiWordMapper(str(SentenceCleaner.EMOJI_PATH))
 
+
+    def get_short_config_str(self):
+
+        punctuation = '1' if self.punctuation else '0'
+        uppercase = '1' if self.uppercase else '0'
+        verbalize_numbers = '1' if self.verbalize_numbers else '0'
+        verbalize_acronyms = '1' if self.verbalize_acronyms else '0'
+        remove_underscore = '1' if self.remove_underscore else '0'
+        config_short_name = 'p{}u{}vn{}va{}ru{}'.format(
+            punctuation,
+            uppercase,
+            verbalize_numbers,
+            verbalize_acronyms,
+            remove_underscore,
+        )
+        return config_short_name 
+
     def remove_emojis(self, sentence: str) -> str:
         """Removes unicode and classic emojis from text.
 
